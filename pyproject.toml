@@ -1,6 +1,6 @@
 [project]
-name = "freesimplegui"
-version = "0.1.0"
+name = "freesimplesql"
+version = "0.1.1"
 description = "A SQLite database browser using freesimplegui"
 requires-python = ">=3.7"
 dependencies = [
@@ -10,6 +10,7 @@ dependencies = [
     "python-dateutil>=2.8.2",
     "sqlmodel>=0.0.24",
 ]
+readme = "readme.md"
 
 [build-system]
 requires = ["hatchling"]
