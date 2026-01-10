@@ -1,6 +1,10 @@
 # FreeSimpleSQL
 
-![Screenshot](screenshot.png)
+[![GitHub](https://img.shields.io/badge/github-lyle/freesimplesql-blue?logo=github)](https://github.com/lyle/freesimplesql)
+[![PyPI](https://img.shields.io/pypi/v/freesimplesql)](https://pypi.org/project/freesimplesql/)
+[![Python](https://img.shields.io/pypi/pyversions/freesimplesql)](https://pypi.org/project/freesimplesql/)
+
+![Screenshot](https://raw.githubusercontent.com/lyle/freesimplesql/main/screenshot.png)
 
 **FreeSimpleSQL** is a powerful AI-enhanced SQL database browser for SQLite with an intuitive GUI. Generate SQL queries from natural language, edit records, manage databases, and customize your experience with theme support.
 
@@ -38,11 +42,12 @@
 pip install freesimplesql
 ```
 
-Or clone and run directly:
+Or clone from GitHub and run directly:
 
 ```sh
-git clone https://github.com/yourusername/freesimplesql.git
+git clone https://github.com/lyle/freesimplesql.git
 cd freesimplesql
+uv sync
 python -m freesimplesql
 ```
 

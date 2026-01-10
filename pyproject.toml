@@ -29,6 +29,12 @@ dependencies = [
     "sqlmodel>=0.0.24",
 ]
 
+[project.urls]
+Homepage = "https://github.com/jstdlee/freesimplesql"
+Repository = "https://github.com/jstdlee/freesimplesql"
+"Bug Tracker" = "https://github.com/jstdlee/freesimplesql/issues"
+Documentation = "https://github.com/jstdlee/freesimplesql#readme"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
