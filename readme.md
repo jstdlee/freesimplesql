@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/freesimplesql)](https://pypi.org/project/freesimplesql/)
 [![Python](https://img.shields.io/pypi/pyversions/freesimplesql)](https://pypi.org/project/freesimplesql/)
 
-![Screenshot](https://raw.githubusercontent.com/jstdlee/freesimplesql/main/screenshot.png)
+![Screenshot](https://github.com/jstdlee/freesimplesql/blob/master/screenshot.png?raw=true)
 
 **FreeSimpleSQL** is a powerful AI-enhanced SQL database browser for SQLite with an intuitive GUI. Generate SQL queries from natural language, edit records, manage databases, and customize your experience with theme support.
 
