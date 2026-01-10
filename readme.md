@@ -2,37 +2,161 @@
 
 ![Screenshot](screenshot.png)
 
-**FreeSimpleSQL** is a lightweight, zero-dependency SQL runner for SQLite, designed for simplicity and speed.
+**FreeSimpleSQL** is a powerful AI-enhanced SQL database browser for SQLite with an intuitive GUI. Generate SQL queries from natural language, edit records, manage databases, and customize your experience with theme support.
 
-## Features
+## ✨ Features
 
-- 🐍 Use as a Python module: `python -m freesimplesql`
-- 📜 Run via script: `python run_freesimplesql.py`
-- 💾 No installation required, pure Python
-- 📜 View the DB records only, no roadmap to support edit operations
+### 🤖 AI-Powered SQL Generation
+- **Natural Language to SQL**: Describe what you want in plain English, and let AI generate the SQL query for you
+- **OpenRouter Integration**: Support for multiple AI models including Google Gemini, Claude, and more
+- **Editable Results**: AI-generated queries can be manually edited before execution
+- **Query History**: Track both your natural language prompts and the executed SQL queries
 
-## Quick Start
+### 🗄️ Database Management
+- **SQLite Browser**: View, search, and paginate through database records
+- **Record Editing**: Double-click any row to edit records with built-in validation
+- **Export/Import**: Backup and restore databases with a single click
+- **Schema Viewer**: Built-in schema inspector to understand your database structure
 
-### 1. Run as a module
+### 🎨 User Experience
+- **Theme Switching**: Choose from 100+ built-in themes with instant live preview
+- **Resizable Split Panes**: Customize your workspace layout
+- **Auto-save Settings**: API keys, model preferences, and themes persist across sessions
+- **Pagination**: Efficiently browse large datasets with configurable page sizes
 
-```sh
-python -m freesimplesql
-```
+### 🛠️ Technical Features
+- **Zero Manual Setup**: Generates sample data automatically on first run
+- **Type Validation**: Automatic validation for IP addresses, JSON, timestamps, and more
+- **Error Handling**: Comprehensive error messages with troubleshooting tips
+- **Pure Python**: No external database dependencies beyond SQLite
 
-### 2. Run by script
+## 🚀 Quick Start
 
-```sh
-freesimplesql.exe
-```
-
-## Installation
-
-Clone the repo and use directly, or install with pip:
+### Installation
 
 ```sh
 pip install freesimplesql
 ```
 
-## License
+Or clone and run directly:
 
-MIT License
+```sh
+git clone https://github.com/yourusername/freesimplesql.git
+cd freesimplesql
+python -m freesimplesql
+```
+
+### Running the Application
+
+```sh
+# Run as a module
+uv run python -m freesimplesql
+
+# Or run the executable (if built)
+freesimplesql.exe
+```
+
+## 🔧 Configuration
+
+### AI Integration Setup
+
+1. **Get an API Key**: Sign up at [OpenRouter](https://openrouter.ai/keys) to get your free API key
+2. **Configure in App**: Enter your API key in the AI Builder Settings section
+3. **Select a Model**: Choose from available models (free models are available!)
+4. **Start Generating**: Write natural language prompts and generate SQL instantly
+
+### Settings Persistence
+
+Your settings are automatically saved to `settings.json`:
+- API URL and Model selection
+- API Key (encrypted storage recommended for production)
+- Selected theme
+- All settings persist across sessions
+
+## 📖 Usage Examples
+
+### AI-Generated Queries
+
+```
+Prompt: "Show all error messages from yesterday"
+Generated SQL: SELECT * FROM message WHERE msg_name = 'ERROR' AND timestamp > '2026-01-09'
+```
+
+```
+Prompt: "Find messages with 'timeout' in content"
+Generated SQL: SELECT * FROM message WHERE msg_content LIKE '%timeout%'
+```
+
+### Manual Editing
+
+After AI generation, you can:
+- Edit the SQL query directly in the text editor
+- Click "Search" to execute your customized query
+- View results in the paginated table below
+
+### Record Editing
+
+1. Double-click any row in the results table
+2. Edit fields in the modal dialog
+3. Validation ensures data integrity:
+   - IP addresses must be valid IPv4/IPv6
+   - JSON content is validated
+   - Timestamps follow ISO format
+   - Serial numbers must be integers
+
+## 🎨 Theme Options
+
+Choose from themes including:
+- DarkBlue3 (developer favorite)
+- SystemDefaultForReal (clean & professional)
+- DarkGrey
+- LightGreen
+- And 100+ more!
+
+Changes apply instantly without restart.
+
+## 📊 Database Schema
+
+The default schema includes a `message` table with:
+- `id`: Primary key
+- `sn`: Serial number
+- `timestamp`: Message timestamp
+- `src_ip`, `dst_ip`: Source and destination IPs
+- `msg_name`: Message type (INFO, WARNING, ERROR, etc.)
+- `msg_content`: JSON message payload
+- `hexvalue`: Hex-encoded content
+
+## 🔒 Security Notes
+
+- API keys are stored in plaintext in `settings.json` - use environment variables in production
+- The application runs locally - your data never leaves your machine
+- OpenRouter communications are encrypted via HTTPS
+
+## 🐛 Troubleshooting
+
+### "No cookie auth credentials found" (401 Error)
+- Verify your API key is correct (should start with `sk-or-...` for OpenRouter)
+- Check that you're using the correct API endpoint
+- Ensure your key has credits/permissions
+
+### "KeyError" on Reset
+- This has been fixed in the latest version
+- Update to the latest release
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit pull requests or open issues.
+
+## 📄 License
+
+MIT License - see LICENSE file for details
+
+## 🙏 Acknowledgments
+
+- Built with [FreeSimpleGUI](https://github.com/spyoungtech/FreeSimpleGUI)
+- Powered by [SQLModel](https://sqlmodel.tiangolo.com/)
+- AI integration via [OpenRouter](https://openrouter.ai)
+
+---
+
+**Made with ❤️ for developers who want simple, powerful database tools**

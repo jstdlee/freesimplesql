@@ -11,6 +11,8 @@ from faker import Faker
 from loguru import logger
 from pydantic import field_validator
 import shutil
+import requests
+import os
 
 class Message(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -110,6 +112,39 @@ class DBBrowser:
                 self.total_rows = 0
                 return []
 
+    def update_record(self, record_id: int, new_data: dict):
+        with Session(self.engine) as session:
+            try:
+                record = session.get(Message, record_id)
+                if not record:
+                    return False, "Record not found"
+                
+                # Update fields
+                for key, value in new_data.items():
+                    if hasattr(record, key):
+                        setattr(record, key, value)
+                
+                session.add(record)
+                session.commit()
+                session.refresh(record)
+                return True, "Success"
+            except Exception as e:
+                logger.error(f"Update failed: {e}")
+                return False, str(e)
+
+                return False, str(e)
+
+    def get_schema(self):
+        try:
+            with Session(self.engine) as session:
+                # specific for sqlite
+                result = session.exec(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='message'")).first()
+                if result:
+                    return result[0]
+                return "Schema not found."
+        except Exception as e:
+            return f"Error retrieving schema: {e}"
+
     def get_columns(self):
         return ["sn", "timestamp", "src_ip", "dst_ip", "msg_name", "msg_content", "hexvalue"]
 
@@ -126,52 +161,148 @@ class DBBrowser:
 
 
 
+
+# --- Settings Persistence ---
+SETTINGS_FILE = 'settings.json'
+
+def load_settings():
+    default_settings = {
+        'url': 'https://openrouter.ai/api/v1/chat/completions',
+        'model': 'google/gemini-2.0-flash-exp:free',
+        'key': '',
+        'theme': 'SystemDefaultForReal'
+    }
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, 'r') as f:
+                return {**default_settings, **json.load(f)}
+        except Exception as e:
+            logger.error(f"Failed to load settings: {e}")
+    return default_settings
+
+def save_settings(url, model, key, theme=None):
+    try:
+        data = {'url': url, 'model': model, 'key': key}
+        if theme:
+            data['theme'] = theme
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.error(f"Failed to save settings: {e}")
+
 def main():
-    sg.theme('DarkBlue3')
+    settings = load_settings()
+    sg.theme(settings.get('theme', 'SystemDefaultForReal'))
+    
     browser = DBBrowser()
-    columns = browser.get_columns()
+    settings = load_settings()
+
+    # Get all column names from SQLModel
+    columns = list(Message.model_fields.keys())
 
     current_page_rows = []  # Store the current page's row objects
 
     def update_table(query_text=None):
         nonlocal current_page_rows
-        logger.debug("Updating table with new query results")
+        # logger.debug("Updating table with new query results")
         rows = browser.execute_query(query_text)
         table_data = [[getattr(row, col) for col in columns] for row in rows]
         window['-TABLE-'].update(values=table_data)
-        current_page_rows = rows  # Store the current page's row objects for later use
+        current_page_rows = rows  
         max_pages = (browser.total_rows - 1) // browser.page_size + 1 if browser.total_rows > 0 else 1
         window['-PAGE_INFO-'].update(f"Page {browser.current_page + 1} of {max_pages}")
-        logger.debug(f"Table updated. Current page: {browser.current_page + 1}, Total pages: {max_pages}")
+
+    def open_edit_modal(row_data: Message):
+        """Opens a modal to edit the selected record."""
+        layout = []
+        fields = ["sn", "timestamp", "src_ip", "dst_ip", "msg_name", "msg_content", "hexvalue"]
+        
+        for field in fields:
+            val = getattr(row_data, field)
+            if field in ['msg_content', 'hexvalue']:
+                layout.append([sg.Text(field, size=(15, 1)), sg.Multiline(val, key=field, size=(50, 8), expand_x=True, expand_y=True)])
+            else:
+                layout.append([sg.Text(field, size=(15, 1)), sg.Input(val, key=field, expand_x=True)])
+            
+        layout.append([sg.Button('Save'), sg.Button('Cancel')])
+        
+        edit_window = sg.Window('Edit Record', layout, modal=True, finalize=True, resizable=True, size=(1000, 800))
+        
+        ret_val = None
+        while True:
+            e, v = edit_window.read()
+            if e in (sg.WIN_CLOSED, 'Cancel'):
+                break
+            if e == 'Save':
+                try:
+                    cleaned_data = v.copy()
+                    cleaned_data['sn'] = int(v['sn'])
+                    ts_val = v['timestamp']
+                    if isinstance(ts_val, str):
+                        if ' ' in ts_val and 'T' not in ts_val:
+                            ts_val = ts_val.replace(' ', 'T')
+                        cleaned_data['timestamp'] = datetime.fromisoformat(ts_val)
+                    
+                    try:
+                        ipaddress.ip_address(cleaned_data['src_ip'])
+                        ipaddress.ip_address(cleaned_data['dst_ip'])
+                    except ValueError:
+                        raise ValueError("Invalid IP Address format")
+                        
+                    try:
+                        json.loads(cleaned_data['msg_content'])
+                    except json.JSONDecodeError:
+                          raise ValueError("Invalid JSON in msg_content")
+                          
+                    ret_val = cleaned_data
+                    break
+                except ValueError as ve:
+                    sg.popup_error(f"Validation Error: {ve}")
+                except Exception as e:
+                    sg.popup_error(f"Error: {e}")
+
+        edit_window.close()
+        return ret_val
 
     # --- Layout columns ---
-    builder_col = sg.Column([
-        [sg.Text("SQL Query:")],
-        [sg.Multiline(default_text=browser.default_query, size=(60, 5), key='-QUERY-', expand_x=True, expand_y=True)],
-        [
-            sg.Combo(columns, default_value=columns[0], key='-FILTER-COL-', size=(15, 1)),
-            sg.Combo(['=', '!=', '>', '<', 'LIKE'], default_value='=', key='-FILTER-OP-', size=(10, 1)),
-            sg.InputText(key='-FILTER-VALUE-', size=(15, 1)),
-            sg.Button('ADD', key='-ADD-FILTER-'),
-            sg.Button('OR', key='-OR-FILTER-'),
-            sg.Button('NOT', key='-NOT-FILTER-'),
-            sg.Button(' ( ', key='-OPEN-BRACKET-'),
-            sg.Button(' ) ', key='-CLOSE-BRACKET-'),
-            sg.Push(),
-            sg.Button('Search', key='-SEARCH-'),
-            sg.Button('Reset', key='-RESET-'),
-            sg.Text('|'),
-            sg.Button('Export DB', key='-EXPORT-'),
-            sg.Button('Import DB', key='-IMPORT-')
-        ],
-    ], expand_x=True, expand_y=False)
+    
+    # 1. AI Configuration & Prompt (Replaces top section)
+    ai_config_layout = [
+        [sg.Text('URL:', size=(5, 1)), sg.Input(settings['url'], key='-AI-URL-', expand_x=True),
+         sg.Text('Model:', size=(5, 1)), sg.Input(settings['model'], key='-AI-MODEL-', expand_x=True)],
+        [sg.Text('Key:', size=(5, 1)), sg.Input(settings['key'], key='-AI-KEY-', password_char='*', expand_x=True)]
+    ]
+    
+    ai_prompt_layout = [
+        [sg.Text("Natural Language Prompt:"), sg.Push()],
+        [sg.Multiline(size=(60, 3), key='-AI-PROMPT-', expand_x=True, enter_submits=True)],
+        [sg.Button('Generate SQL', key='-AI-GENERATE-')]
+    ]
 
-    history_col = sg.Column([
-        [sg.Text("Query History:")],
-        [sg.Multiline(size=(30, 7), key='-HISTORY-', disabled=True, expand_x=True, expand_y=True)]
-    ], expand_x=True, expand_y=False)
+    # Get available themes
+    available_themes = sg.theme_list()
+    current_theme = sg.theme()
+    
+    # Action Buttons
+    action_buttons_row = [
+        sg.Button('Search', key='-SEARCH-'),
+        sg.Button('Reset', key='-RESET-'),
+        sg.Push(),
+        sg.Text('Theme:', size=(5, 1)),
+        sg.Combo(available_themes, default_value=current_theme, key='-THEME-', size=(20, 1), enable_events=True, readonly=True),
+        sg.Button('Export DB', key='-EXPORT-'),
+        sg.Button('Import DB', key='-IMPORT-')
+    ]
 
-    table_col = sg.Column([
+    # --- LEFT PANE CONTENT ---
+    left_pane_content = [
+        [sg.Frame('AI Builder Settings', ai_config_layout, expand_x=True)],
+        *ai_prompt_layout,
+        [sg.Text("SQL Query (Generated/Editable):")],
+        # This Multiline replaces the old -QUERY- and -AI-RESPONSE-
+        [sg.Multiline(default_text=browser.default_query, size=(60, 6), key='-QUERY-', expand_x=True, expand_y=True)],
+        action_buttons_row,
+        [sg.HorizontalSeparator()],
         [sg.Text("Data Table:")],
         [sg.Table(
             values=[],
@@ -192,36 +323,168 @@ def main():
             sg.Button('Next', key='-NEXT-'),
             sg.Button('Last', key='-LAST-')
         ]
-    ], expand_x=True, expand_y=True)
-
-    detail_tabs_col = sg.Column([
-        [sg.TabGroup([
-            [
-                sg.Tab('Detail View (JSON)', [[sg.Multiline(size=(50, 30), key='-DETAIL-', disabled=True, expand_x=True, expand_y=True)]], key='-DETAIL-TAB-'),
-                sg.Tab('Compact View', [[sg.Multiline(size=(40, 30), key='-COMPACT-', disabled=True, expand_x=True, expand_y=True)]], key='-COMPACT-TAB-')
-            ]
-        ], key='-TABS-', expand_x=True, expand_y=True)]
-    ], expand_x=True, expand_y=True)
-
-    layout = [
-        [
-            builder_col,
-            history_col
-        ],
-        [
-            table_col,
-            detail_tabs_col
-        ]
     ]
 
-    window = sg.Window('Database Browser', layout, resizable=True, finalize=True, size=(1800, 900))
+    # --- RIGHT PANE CONTENT (History + Details + Schema Context) ---
+    # Moved Schema here as a tab or just context? User said "condition builder shall includes all db fields"
+    # User didn't ask to remove Context, but AI Builder Tab is gone. I'll put Schema in a Tab in Right Pane.
+    right_pane_content = [
+        [sg.Text("Query History:")],
+        [sg.Multiline(size=(30, 10), key='-HISTORY-', disabled=True, expand_x=True, expand_y=True)],
+        [sg.HorizontalSeparator()],
+        [sg.TabGroup([
+            [
+                sg.Tab('Detail View', [[sg.Multiline(size=(40, 30), key='-DETAIL-', disabled=True, expand_x=True, expand_y=True)]], key='-DETAIL-TAB-'),
+                sg.Tab('Compact View', [[sg.Multiline(size=(40, 30), key='-COMPACT-', disabled=True, expand_x=True, expand_y=True)]], key='-COMPACT-TAB-'),
+                sg.Tab('Schema Context', [[sg.Multiline(size=(40, 30), key='-SCHEMA-CONTEXT-', disabled=True, expand_x=True, expand_y=True)]], key='-SCHEMA-TAB-')
+            ]
+        ], key='-TABS-', expand_x=True, expand_y=True)]
+    ]
+
+    # Use sg.Column to wrap contents for Pane
+    left_col = sg.Column(left_pane_content, expand_x=True, expand_y=True, key='-LEFT-PANE-', size=(1080, 800))
+    right_col = sg.Column(right_pane_content, expand_x=True, expand_y=True, key='-RIGHT-PANE-', size=(720, 800))
+
+    layout = [
+        [sg.Pane([left_col, right_col], orientation='horizontal', relief=sg.RELIEF_GROOVE, expand_x=True, expand_y=True, show_handle=True)]
+    ]
+
+    window = sg.Window('FreeSimpleSQL', layout, resizable=True, finalize=True, size=(1800, 900))
+    
+    # Initialize Schema Text in the new tab
+    window['-SCHEMA-CONTEXT-'].update(browser.get_schema())
+    
     # Use LIMIT for the default query
     update_table(browser.default_query)
+        
+    # Bind double click event
+    window['-TABLE-'].bind('<Double-Button-1>', '+DOUBLE_CLICK+')
 
     while True:
         event, values = window.read()
         if event == sg.WIN_CLOSED:
             break
+        elif event == '-THEME-':
+            # Change theme immediately by saving and restarting
+            new_theme = values['-THEME-']
+            # Save all current settings including the new theme
+            save_settings(
+                values['-AI-URL-'],
+                values['-AI-MODEL-'],
+                values['-AI-KEY-'],
+                new_theme
+            )
+            # Close current window and restart with new theme
+            window.close()
+            main()
+            return
+        elif event == '-AI-GENERATE-':
+            url = values['-AI-URL-'].strip()
+            model = values['-AI-MODEL-'].strip()
+            api_key = values['-AI-KEY-'].strip()
+            prompt = values['-AI-PROMPT-'].strip()
+            # Get schema from the hidden/right pane tab
+            schema = values['-SCHEMA-CONTEXT-'] 
+            
+            # Save settings
+            save_settings(url, model, api_key)
+
+            if not api_key:
+                sg.popup_error("Please enter an API Key.")
+                continue
+            
+            if not prompt:
+                sg.popup_error("Please enter a natural language prompt.")
+                continue
+
+            # Validate URL
+            if not url.startswith('http'):
+                sg.popup_error("Invalid API URL. Must start with http:// or https://")
+                continue
+
+            full_prompt = f"Given the following SQLite schema:\n{schema}\n\nWrite a SQL query for: {prompt}\nOnly return the SQL, no markdown or explanation."
+            
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": full_prompt}
+                ]
+            }
+            
+            # Match OpenRouter's exact example format
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            try:
+                window.set_cursor('wait')
+                
+                # Make the API request using the exact format from OpenRouter's example
+                response = requests.post(
+                    url=url,
+                    headers=headers,
+                    data=json.dumps(payload),  # Using data=json.dumps() as in their example
+                    timeout=60
+                )
+                
+                # Log the response for debugging
+                logger.debug(f"API Response Status: {response.status_code}")
+                logger.debug(f"API Response Headers: {response.headers}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'choices' in data and len(data['choices']) > 0:
+                        content = data['choices'][0]['message']['content']
+                        # Clean up markdown formatting
+                        content = content.replace('```sql', '').replace('```', '').strip()
+                        # Update the Main Query Window
+                        window['-QUERY-'].update(content)
+                        sg.popup_quick_message('SQL generated successfully!', background_color='green', text_color='white')
+                    else:
+                        sg.popup_error(f"No content in response.\n\nResponse: {data}")
+                elif response.status_code == 401:
+                    error_detail = response.text
+                    sg.popup_error(
+                        f"Authentication Error (401)\n\n"
+                        f"Your API key may be invalid or expired.\n\n"
+                        f"Server response: {error_detail}\n\n"
+                        f"Tips:\n"
+                        f"1. Verify your API key is correct\n"
+                        f"2. Check if your key has the required permissions\n"
+                        f"3. Ensure you're using the correct API endpoint\n"
+                        f"4. For OpenRouter, keys should start with 'sk-or-...'\n"
+                        f"5. Get a key at: https://openrouter.ai/keys"
+                    )
+                else:
+                    sg.popup_error(f"Error {response.status_code}\n\n{response.text}")
+
+            except requests.exceptions.Timeout:
+                sg.popup_error("Request timed out. The API server may be slow or unavailable.")
+            except requests.exceptions.ConnectionError:
+                sg.popup_error(f"Connection error. Could not reach: {url}")
+            except requests.exceptions.RequestException as e:
+                sg.popup_error(f"Request Error: {str(e)}")
+            except Exception as e:
+                sg.popup_error(f"Unexpected Error: {str(e)}")
+            finally:
+                window.set_cursor('arrow')
+
+        elif event == '-TABLE-+DOUBLE_CLICK+':
+            if len(values['-TABLE-']) > 0:
+                row_idx = values['-TABLE-'][0]
+                # Check if row_idx is valid
+                if row_idx < len(current_page_rows):
+                    row_data = current_page_rows[row_idx]
+                    new_values = open_edit_modal(row_data)
+                    if new_values:
+                        success, pid = browser.update_record(row_data.id, new_values)
+                        if success:
+                            # Refresh table
+                            update_table(values['-QUERY-'].strip())
+                        else:
+                            sg.popup_error(f"Failed to update record: {pid}")
+                            
         elif event == '-EXPORT-':
             export_path = sg.popup_get_file('Save database as...', save_as=True, default_extension='.db', file_types=(('SQLite DB', '*.db'),))
             if export_path:
@@ -257,55 +520,61 @@ def main():
             browser.current_page = 0
             query = values['-QUERY-'].strip()
             if query:
-                # Add query to the top of the history
+                # Build history entry with prompt and SQL
+                prompt = values['-AI-PROMPT-'].strip()
+                history_entry = ""
+                if prompt:
+                    history_entry += f"Prompt: {prompt}\n"
+                history_entry += f"SQL: {query}\n--------\n"
+                
+                # Add to the top of the history
                 history = window['-HISTORY-'].get()
-                updated_history = f"{query}\n{history}" if history else query
+                updated_history = f"{history_entry}{history}" if history else history_entry
                 window['-HISTORY-'].update(updated_history)
                 update_table(query)
+        
+        # --- Operator Buttons: Just append text ---
         elif event == '-NOT-FILTER-':
-            col = values['-FILTER-COL-']
-            op = values['-FILTER-OP-']
-            val = values['-FILTER-VALUE-']
-            if col and op and val:
-                condition = f"{col} {op} '{val}'"
-                current_query = values['-QUERY-'].strip()
-                if 'WHERE' in current_query.upper():
-                    updated_query = f"{current_query} NOT {condition}"
-                else:
-                    updated_query = f"{current_query} WHERE {condition}"
-                window['-QUERY-'].update(updated_query)                
+            current_query = values['-QUERY-'].strip()
+            updated_query = f"{current_query} NOT "
+            window['-QUERY-'].update(updated_query)                
         elif event == '-ADD-FILTER-':
-            col = values['-FILTER-COL-']
-            op = values['-FILTER-OP-']
-            val = values['-FILTER-VALUE-']
-            if col and op and val:
-                condition = f"{col} {op} '{val}'"
-                current_query = values['-QUERY-'].strip()
-                if 'WHERE' in current_query.upper():
-                    updated_query = f"{current_query} AND {condition}"
-                else:
-                    updated_query = f"{current_query} WHERE {condition}"
-                window['-QUERY-'].update(updated_query)
+            current_query = values['-QUERY-'].strip()
+            updated_query = f"{current_query} AND "
+            window['-QUERY-'].update(updated_query)
         elif event == '-OR-FILTER-':
-            col = values['-FILTER-COL-']
-            op = values['-FILTER-OP-']
-            val = values['-FILTER-VALUE-']
-            if col and op and val:
-                condition = f"{col} {op} '{val}'"
-                current_query = values['-QUERY-'].strip()
-                if 'WHERE' in current_query.upper():
-                    updated_query = f"{current_query} OR {condition}"
-                else:
-                    updated_query = f"{current_query} WHERE {condition}"
-                window['-QUERY-'].update(updated_query)
+            current_query = values['-QUERY-'].strip()
+            updated_query = f"{current_query} OR "
+            window['-QUERY-'].update(updated_query)
         elif event == '-OPEN-BRACKET-':
             current_query = values['-QUERY-'].strip()
-            updated_query = f"{current_query} ("
+            updated_query = f"{current_query} ( "
             window['-QUERY-'].update(updated_query)
         elif event == '-CLOSE-BRACKET-':
             current_query = values['-QUERY-'].strip()
-            updated_query = f"{current_query} )"
+            updated_query = f"{current_query} ) "
             window['-QUERY-'].update(updated_query)
+            
+        elif event == '-SHOW-SCHEMA-':
+            # Open the new AI Builder
+            open_ai_builder(browser.get_schema())
+
+        # Check for Append Condition buttons (0-3)
+        if isinstance(event, str) and event.startswith('-APPEND-CONDITION-'):
+            try:
+                # event format: -APPEND-CONDITION-0-
+                idx = int(event.split('-')[3])
+                col = values[f'-FILTER-COL-{idx}-']
+                op = values[f'-FILTER-OP-{idx}-']
+                val = values[f'-FILTER-VALUE-{idx}-']
+                if col and op and val:
+                    condition = f"{col} {op} '{val}'"
+                    current_query = values['-QUERY-'].strip()
+                    updated_query = f"{current_query} {condition}"
+                    window['-QUERY-'].update(updated_query)
+            except Exception as e:
+                logger.error(f"Error appending condition: {e}")
+                
         elif event == '-FIRST-':
             browser.current_page = 0
             update_table(values['-QUERY-'].strip())

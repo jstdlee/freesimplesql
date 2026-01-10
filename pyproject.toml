@@ -1,13 +1,14 @@
 [project]
 name = "freesimplesql"
 version = "0.1.1"
-description = "A SQLite database browser using freesimplegui"
+description = "A SQLite database browser, editor and ai query builder using freesimplegui"
 requires-python = ">=3.7"
 dependencies = [
     "faker>=18.13.0",
     "freesimplegui>=5.2.0.post1",
     "loguru>=0.7.3",
     "python-dateutil>=2.8.2",
+    "requests>=2.31.0",
     "sqlmodel>=0.0.24",
 ]
 readme = "readme.md"
