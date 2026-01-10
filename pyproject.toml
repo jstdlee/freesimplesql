@@ -1,6 +1,6 @@
 [project]
 name = "freesimplesql"
-version = "0.2"
+version = "0.2.1"
 description = "A SQLite database browser, editor and AI query builder using FreeSimpleGUI"
 requires-python = ">=3.7"
 license = {text = "MIT"}
