@@ -164,6 +164,7 @@ class DBBrowser:
 
 # --- Settings Persistence ---
 SETTINGS_FILE = 'settings.json'
+STATE_FILE = 'app_state.json'
 
 def load_settings():
     default_settings = {
@@ -190,8 +191,37 @@ def save_settings(url, model, key, theme=None):
     except Exception as e:
         logger.error(f"Failed to save settings: {e}")
 
+def load_state():
+    """Load UI state (query, prompt, history) from disk"""
+    default_state = {
+        'query': 'SELECT * FROM message',
+        'prompt': '',
+        'history': ''
+    }
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                return {**default_state, **json.load(f)}
+        except Exception as e:
+            logger.error(f"Failed to load state: {e}")
+    return default_state
+
+def save_state(query, prompt, history):
+    """Save UI state (query, prompt, history) to disk"""
+    try:
+        data = {
+            'query': query,
+            'prompt': prompt,
+            'history': history
+        }
+        with open(STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save state: {e}")
+
 def main():
     settings = load_settings()
+    state = load_state()  # Load saved UI state
     sg.theme(settings.get('theme', 'SystemDefaultForReal'))
     
     browser = DBBrowser()
@@ -220,7 +250,17 @@ def main():
         for field in fields:
             val = getattr(row_data, field)
             if field in ['msg_content', 'hexvalue']:
-                layout.append([sg.Text(field, size=(15, 1)), sg.Multiline(val, key=field, size=(50, 8), expand_x=True, expand_y=True)])
+                # Format JSON content for better readability
+                display_val = val
+                if field == 'msg_content':
+                    try:
+                        # Try to parse and pretty-print JSON
+                        parsed = json.loads(val)
+                        display_val = json.dumps(parsed, indent=2, ensure_ascii=False)
+                    except (json.JSONDecodeError, TypeError):
+                        # If not valid JSON, display as-is
+                        display_val = val
+                layout.append([sg.Text(field, size=(15, 1)), sg.Multiline(display_val, key=field, size=(50, 8), expand_x=True, expand_y=True)])
             else:
                 layout.append([sg.Text(field, size=(15, 1)), sg.Input(val, key=field, expand_x=True)])
             
@@ -250,7 +290,9 @@ def main():
                         raise ValueError("Invalid IP Address format")
                         
                     try:
-                        json.loads(cleaned_data['msg_content'])
+                        # Validate and normalize JSON (remove formatting)
+                        parsed_content = json.loads(cleaned_data['msg_content'])
+                        cleaned_data['msg_content'] = json.dumps(parsed_content, ensure_ascii=False)
                     except json.JSONDecodeError:
                           raise ValueError("Invalid JSON in msg_content")
                           
@@ -275,7 +317,7 @@ def main():
     
     ai_prompt_layout = [
         [sg.Text("Natural Language Prompt:"), sg.Push()],
-        [sg.Multiline(size=(60, 3), key='-AI-PROMPT-', expand_x=True, enter_submits=True)],
+        [sg.Multiline(default_text=state['prompt'], size=(60, 3), key='-AI-PROMPT-', expand_x=True, enter_submits=True)],
         [sg.Button('Generate SQL', key='-AI-GENERATE-')]
     ]
 
@@ -300,7 +342,7 @@ def main():
         *ai_prompt_layout,
         [sg.Text("SQL Query (Generated/Editable):")],
         # This Multiline replaces the old -QUERY- and -AI-RESPONSE-
-        [sg.Multiline(default_text=browser.default_query, size=(60, 6), key='-QUERY-', expand_x=True, expand_y=True)],
+        [sg.Multiline(default_text=state['query'], size=(60, 6), key='-QUERY-', expand_x=True, expand_y=True)],
         action_buttons_row,
         [sg.HorizontalSeparator()],
         [sg.Text("Data Table:")],
@@ -330,7 +372,7 @@ def main():
     # User didn't ask to remove Context, but AI Builder Tab is gone. I'll put Schema in a Tab in Right Pane.
     right_pane_content = [
         [sg.Text("Query History:")],
-        [sg.Multiline(size=(30, 10), key='-HISTORY-', disabled=True, expand_x=True, expand_y=True)],
+        [sg.Multiline(default_text=state['history'], size=(30, 10), key='-HISTORY-', disabled=True, expand_x=True, expand_y=True)],
         [sg.HorizontalSeparator()],
         [sg.TabGroup([
             [
@@ -363,6 +405,12 @@ def main():
     while True:
         event, values = window.read()
         if event == sg.WIN_CLOSED:
+            # Save state before closing
+            save_state(
+                values['-QUERY-'],
+                values['-AI-PROMPT-'],
+                values['-HISTORY-']
+            )
             break
         elif event == '-THEME-':
             # Change theme immediately by saving and restarting
@@ -373,6 +421,12 @@ def main():
                 values['-AI-MODEL-'],
                 values['-AI-KEY-'],
                 new_theme
+            )
+            # Save current UI state before restart
+            save_state(
+                values['-QUERY-'],
+                values['-AI-PROMPT-'],
+                values['-HISTORY-']
             )
             # Close current window and restart with new theme
             window.close()
@@ -440,6 +494,8 @@ def main():
                         content = content.replace('```sql', '').replace('```', '').strip()
                         # Update the Main Query Window
                         window['-QUERY-'].update(content)
+                        # Save state to preserve the generated query
+                        save_state(content, values['-AI-PROMPT-'], values['-HISTORY-'])
                         sg.popup_quick_message('SQL generated successfully!', background_color='green', text_color='white')
                     else:
                         sg.popup_error(f"No content in response.\n\nResponse: {data}")
@@ -531,6 +587,8 @@ def main():
                 history = window['-HISTORY-'].get()
                 updated_history = f"{history_entry}{history}" if history else history_entry
                 window['-HISTORY-'].update(updated_history)
+                # Save state to preserve history
+                save_state(query, prompt, updated_history)
                 update_table(query)
         
         # --- Operator Buttons: Just append text ---
