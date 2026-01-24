@@ -13,6 +13,73 @@ from pydantic import field_validator
 import shutil
 import requests
 import os
+import pathlib
+import sys
+
+# Configuration file path
+CONFIG_FILE = "app_config.json"
+HISTORY_FILE = "query_history.json"
+MAX_HISTORY = 300
+
+# Available themes
+THEMES = [
+    'DarkBlue3', 'DarkBlue', 'DarkBlue2', 'DarkBlue1',
+    'DarkGreen', 'DarkGreen2', 'DarkGreen1',
+    'DarkGrey', 'DarkGrey2', 'DarkGrey1',
+    'DarkRed', 'DarkRed2', 'DarkRed1',
+    'DarkPurple', 'DarkPurple2', 'DarkPurple1',
+    'DarkTeal', 'DarkTeal2', 'DarkTeal1',
+    'LightBlue', 'LightBlue2', 'LightBlue1',
+    'LightGreen', 'LightGreen2', 'LightGreen1',
+    'LightGrey', 'LightGrey2', 'LightGrey1',
+    'LightRed', 'LightRed2', 'LightRed1',
+    'LightPurple', 'LightPurple2', 'LightPurple1',
+    'LightTeal', 'LightTeal2', 'LightTeal1',
+    'Black', 'Brown', 'SandyBrown', 'Tan',
+    'SystemDefault', 'SystemDefaultForReal'
+]
+
+def load_config():
+    """Load configuration from file."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
+            return {}
+    return {}
+
+def save_config(config):
+    """Save configuration to file."""
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+        logger.debug("Configuration saved successfully")
+    except Exception as e:
+        logger.error(f"Error saving config: {e}")
+
+def load_history():
+    """Load query history from file."""
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading history: {e}")
+            return []
+    return []
+
+def save_history(history):
+    """Save query history to file (max 300 records)."""
+    try:
+        # Keep only last 300 records
+        history_to_save = history[:MAX_HISTORY]
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history_to_save, f, indent=2, ensure_ascii=False)
+        logger.debug(f"History saved successfully ({len(history_to_save)} records)")
+    except Exception as e:
+        logger.error(f"Error saving history: {e}")
 
 class Message(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -94,23 +161,32 @@ class DBBrowser:
                     paginated_query = f"{base_query} LIMIT {limit} OFFSET {offset}"
                     logger.debug(f"Executing paginated SQL query: {paginated_query}")
                     result = session.exec(text(paginated_query))
-                    all_results = [Message(**dict(zip(result.keys(), row))) for row in result]
+                    # Get column names and data as dictionaries
+                    column_names = list(result.keys())
+                    all_results = [dict(zip(column_names, row)) for row in result]
                     # Get total rows for pagination info
                     count_query = f"SELECT COUNT(*) FROM ({base_query}) as subquery"
                     total = session.exec(text(count_query)).first()
                     self.total_rows = total[0] if total else 0
+                    return all_results, column_names
                 else:
                     logger.debug("Executing default paginated query using SQLModel")
                     result = session.exec(select(Message).offset(offset).limit(limit))
                     all_results = list(result)
                     # Get total rows for pagination info
                     self.total_rows = session.exec(select(Message)).count()
-                logger.debug(f"Query returned {len(all_results)} rows (page {self.current_page + 1})")
-                return all_results
+                    # Get actual column names from the first result
+                    if all_results:
+                        # Get column names from the Message model
+                        column_names = self.get_columns()
+                        all_results = [{col: getattr(row, col) for col in column_names} for row in all_results]
+                    else:
+                        column_names = self.get_columns()
+                    return all_results, column_names
             except Exception as e:
                 logger.debug(f"Query error: {e}")
                 self.total_rows = 0
-                return []
+                return [], self.get_columns()
 
     def update_record(self, record_id: int, new_data: dict):
         with Session(self.engine) as session:
@@ -146,10 +222,11 @@ class DBBrowser:
             return f"Error retrieving schema: {e}"
 
     def get_columns(self):
-        return ["sn", "timestamp", "src_ip", "dst_ip", "msg_name", "msg_content", "hexvalue"]
+        return ["id", "sn", "timestamp", "src_ip", "dst_ip", "msg_name", "msg_content", "hexvalue"]
 
     def get_row_dict(self, row: Message):
         return {
+            "id": row.id,
             "sn": row.sn,
             "timestamp": row.timestamp,
             "src_ip": row.src_ip,
@@ -160,192 +237,238 @@ class DBBrowser:
         }
 
 
-
-
-# --- Settings Persistence ---
-SETTINGS_FILE = 'settings.json'
-STATE_FILE = 'app_state.json'
-
-def load_settings():
-    default_settings = {
-        'url': 'https://openrouter.ai/api/v1/chat/completions',
-        'model': 'google/gemini-2.0-flash-exp:free',
-        'key': '',
-        'theme': 'SystemDefaultForReal'
-    }
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, 'r') as f:
-                return {**default_settings, **json.load(f)}
-        except Exception as e:
-            logger.error(f"Failed to load settings: {e}")
-    return default_settings
-
-def save_settings(url, model, key, theme=None):
+def generate_sql_with_ai(prompt: str, model: str, api_key: str, schema: str) -> str:
+    """Generate SQL query using OpenRouter API."""
     try:
-        data = {'url': url, 'model': model, 'key': key}
-        if theme:
-            data['theme'] = theme
-        with open(SETTINGS_FILE, 'w') as f:
-            json.dump(data, f)
-    except Exception as e:
-        logger.error(f"Failed to save settings: {e}")
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        
+        # Clean the API key - remove any whitespace or newlines
+        api_key = api_key.strip()
+        
+        system_prompt = f"""You are a SQL expert. Generate SQL queries based on the user's request.
+        
+Database Schema:
+{schema}
 
-def load_state():
-    """Load UI state (query, prompt, history) from disk"""
-    default_state = {
-        'query': 'SELECT * FROM message',
-        'prompt': '',
-        'history': ''
-    }
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, 'r', encoding='utf-8') as f:
-                return {**default_state, **json.load(f)}
-        except Exception as e:
-            logger.error(f"Failed to load state: {e}")
-    return default_state
+Rules:
+- Generate only the SQL query, no explanations
+- Use proper SQL syntax for SQLite
+- Return only the SELECT statement
+- Do not include any markdown formatting or code blocks
+- Do not include any text before or after the SQL query"""
 
-def save_state(query, prompt, history):
-    """Save UI state (query, prompt, history) to disk"""
-    try:
-        data = {
-            'query': query,
-            'prompt': prompt,
-            'history': history
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://freesimplesql.app",
+            "X-Title": "FreeSimpleSQL"
         }
-        with open(STATE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 500
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        sql_query = result['choices'][0]['message']['content'].strip()
+        
+        # Clean up any markdown code blocks if present
+        if sql_query.startswith('```'):
+            sql_query = sql_query.split('\n', 1)[1]
+        if sql_query.endswith('```'):
+            sql_query = sql_query.rsplit('\n', 1)[0]
+        sql_query = sql_query.strip()
+        
+        # Remove common prefixes
+        for prefix in ['sql', 'SQL', 'sqlite', 'SQLite']:
+            if sql_query.lower().startswith(prefix.lower()):
+                sql_query = sql_query[len(prefix):].strip()
+        
+        return sql_query
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed: {e}")
+        return f"Error: API request failed - {str(e)}"
     except Exception as e:
-        logger.error(f"Failed to save state: {e}")
+        logger.error(f"Error generating SQL: {e}")
+        return f"Error: {str(e)}"
+
 
 def main():
-    settings = load_settings()
-    state = load_state()  # Load saved UI state
-    sg.theme(settings.get('theme', 'SystemDefaultForReal'))
+    # Load configuration
+    config = load_config()
+    
+    # Set theme from config or use default
+    theme = config.get('theme', 'DarkBlue3')
+    if theme in THEMES:
+        sg.theme(theme)
+    else:
+        sg.theme('DarkBlue3')
     
     browser = DBBrowser()
-    settings = load_settings()
-
-    # Get all column names from SQLModel
-    columns = list(Message.model_fields.keys())
+    columns = browser.get_columns()
 
     current_page_rows = []  # Store the current page's row objects
+    current_columns = columns  # Store current table columns
+    query_history_data = load_history()  # Load history from file
+    
+    # Extract query strings for dropdown
+    query_history_list = [item['query'] for item in query_history_data] if query_history_data else []
 
     def update_table(query_text=None):
-        nonlocal current_page_rows
-        # logger.debug("Updating table with new query results")
-        rows = browser.execute_query(query_text)
-        table_data = [[getattr(row, col) for col in columns] for row in rows]
-        window['-TABLE-'].update(values=table_data)
-        current_page_rows = rows  
-        max_pages = (browser.total_rows - 1) // browser.page_size + 1 if browser.total_rows > 0 else 1
-        window['-PAGE_INFO-'].update(f"Page {browser.current_page + 1} of {max_pages}")
-
-    def open_edit_modal(row_data: Message):
-        """Opens a modal to edit the selected record."""
-        layout = []
-        fields = ["sn", "timestamp", "src_ip", "dst_ip", "msg_name", "msg_content", "hexvalue"]
+        nonlocal current_page_rows, current_columns
+        logger.debug("Updating table with new query results")
+        rows, new_columns = browser.execute_query(query_text)
         
-        for field in fields:
-            val = getattr(row_data, field)
-            if field in ['msg_content', 'hexvalue']:
-                # Format JSON content for better readability
-                display_val = val
-                if field == 'msg_content':
-                    try:
-                        # Try to parse and pretty-print JSON
-                        parsed = json.loads(val)
-                        display_val = json.dumps(parsed, indent=2, ensure_ascii=False)
-                    except (json.JSONDecodeError, TypeError):
-                        # If not valid JSON, display as-is
-                        display_val = val
-                layout.append([sg.Text(field, size=(15, 1)), sg.Multiline(display_val, key=field, size=(50, 8), expand_x=True, expand_y=True)])
+        # Create table data with proper columns
+        table_data = []
+        for row in rows:
+            if isinstance(row, dict):
+                table_data.append([str(row.get(col, '')) for col in new_columns])
             else:
-                layout.append([sg.Text(field, size=(15, 1)), sg.Input(val, key=field, expand_x=True)])
-            
-        layout.append([sg.Button('Save'), sg.Button('Cancel')])
+                table_data.append([str(getattr(row, col, '')) for col in new_columns])
         
-        edit_window = sg.Window('Edit Record', layout, modal=True, finalize=True, resizable=True, size=(1000, 800))
+        # Update table values
+        table_elem = window['-TABLE-']
+        table_elem.update(values=table_data)
         
-        ret_val = None
+        # Show column information prominently
+        if new_columns != list(table_elem.ColumnHeadings):
+            # Columns changed - show warning and display actual columns
+            window['-TABLE-INFO-'].update(
+                f"⚠ Query columns: {', '.join(new_columns)} | Showing {len(rows)} rows",
+                text_color='orange'
+            )
+        else:
+            window['-TABLE-INFO-'].update(
+                f"Showing {len(rows)} rows with columns: {', '.join(new_columns)}",
+                text_color='gray'
+            )
+        
+        current_page_rows = rows
+        current_columns = new_columns
+        max_pages = (browser.total_rows - 1) // browser.page_size + 1 if browser.total_rows > 0 else 1
+        window['-PAGE_INFO-'].update(f"Page {browser.current_page + 1} of {max_pages} | Total: {browser.total_rows}")
+        
+        logger.debug(f"Table updated. Current page: {browser.current_page + 1}, Total pages: {max_pages}, Columns: {new_columns}")
+
+    def copy_table_to_csv():
+        """Copy table data to clipboard in CSV format."""
+        nonlocal current_page_rows, current_columns
+        if not current_page_rows or not current_columns:
+            sg.popup_error('No data to copy!')
+            return
+        
+        try:
+            csv_lines = []
+            csv_lines.append(','.join(current_columns))
+            for row in current_page_rows:
+                row_values = []
+                for col in current_columns:
+                    val = str(row.get(col, '') if isinstance(row, dict) else getattr(row, col, ''))
+                    if ',' in val or '"' in val or '\n' in val:
+                        val = '"' + val.replace('"', '""') + '"'
+                    row_values.append(val)
+                csv_lines.append(','.join(row_values))
+            csv_text = '\n'.join(csv_lines)
+            sg.clipboard_set(csv_text)
+            sg.popup_quick_message('Table copied to clipboard as CSV!', background_color='green', text_color='white')
+        except Exception as e:
+            logger.error(f"Error copying table to CSV: {e}")
+            sg.popup_error(f'Error copying table: {e}')
+
+    def open_ai_settings():
+        """Open AI API settings dialog."""
+        ai_layout = [
+            [sg.Text("AI API Settings", font=('Any', 14, 'bold'))],
+            [sg.HorizontalSeparator()],
+            [sg.Text("Model:", size=(10, 1)), 
+             sg.Combo([
+                 'z-ai/glm-4.7-flash',
+                 'openai/gpt-oss-120b',
+                 'x-ai/grok-4.1-fast',
+                 'google/gemini-2.5-flash-lite'
+             ], default_value=config.get('model', 'z-ai/glm-4.7-flash'), key='-AI-MODEL-DLG-', size=(40, 1))],
+            [sg.Text("Or enter model manually:", size=(18, 1)), sg.InputText(key='-AI-MODEL-MANUAL-DLG-', size=(30, 1), expand_x=True)],
+            [sg.Text("API Key:", size=(10, 1)), sg.InputText(default_text=config.get('api_key', ''), key='-AI-API-KEY-DLG-', password_char='*', size=(40, 1), expand_x=True)],
+            [sg.HorizontalSeparator()],
+            [sg.Button('Save', key='-SAVE-AI-SETTINGS-', button_color=('white', 'green')), sg.Button('Cancel', key='-CANCEL-AI-DLG-')]
+        ]
+        
+        ai_window = sg.Window('AI API Settings', ai_layout, modal=True, finalize=True, resizable=True, size=(500, 200))
+        
         while True:
-            e, v = edit_window.read()
-            if e in (sg.WIN_CLOSED, 'Cancel'):
+            event, values = ai_window.read()
+            if event in (sg.WIN_CLOSED, '-CANCEL-AI-DLG-'):
                 break
-            if e == 'Save':
-                try:
-                    cleaned_data = v.copy()
-                    cleaned_data['sn'] = int(v['sn'])
-                    ts_val = v['timestamp']
-                    if isinstance(ts_val, str):
-                        if ' ' in ts_val and 'T' not in ts_val:
-                            ts_val = ts_val.replace(' ', 'T')
-                        cleaned_data['timestamp'] = datetime.fromisoformat(ts_val)
-                    
-                    try:
-                        ipaddress.ip_address(cleaned_data['src_ip'])
-                        ipaddress.ip_address(cleaned_data['dst_ip'])
-                    except ValueError:
-                        raise ValueError("Invalid IP Address format")
-                        
-                    try:
-                        # Validate and normalize JSON (remove formatting)
-                        parsed_content = json.loads(cleaned_data['msg_content'])
-                        cleaned_data['msg_content'] = json.dumps(parsed_content, ensure_ascii=False)
-                    except json.JSONDecodeError:
-                          raise ValueError("Invalid JSON in msg_content")
-                          
-                    ret_val = cleaned_data
-                    break
-                except ValueError as ve:
-                    sg.popup_error(f"Validation Error: {ve}")
-                except Exception as e:
-                    sg.popup_error(f"Error: {e}")
+            elif event == '-SAVE-AI-SETTINGS-':
+                model = values['-AI-MODEL-DLG-']
+                manual_model = values['-AI-MODEL-MANUAL-DLG-'].strip()
+                api_key = values['-AI-API-KEY-DLG-']
+                
+                if not api_key:
+                    sg.popup_error('Please enter your API key.')
+                    continue
+                
+                final_model = manual_model if manual_model else model
+                
+                # Save API key to config
+                config['api_key'] = api_key
+                config['model'] = final_model
+                save_config(config)
+                
+                sg.popup_quick_message('API settings saved!', background_color='green', text_color='white')
+                break
+        
+        ai_window.close()
 
-        edit_window.close()
-        return ret_val
 
-    # --- Layout columns ---
+
+
+
     
-    # 1. AI Configuration & Prompt (Replaces top section)
-    ai_config_layout = [
-        [sg.Text('URL:', size=(5, 1)), sg.Input(settings['url'], key='-AI-URL-', expand_x=True),
-         sg.Text('Model:', size=(5, 1)), sg.Input(settings['model'], key='-AI-MODEL-', expand_x=True)],
-        [sg.Text('Key:', size=(5, 1)), sg.Input(settings['key'], key='-AI-KEY-', password_char='*', expand_x=True)]
+    # AI Builder section (streamlined - auto-applies to query)
+    ai_builder_layout = [
+        [sg.Text("AI SQL Generator", font=('Any', 14, 'bold'))],
+        [sg.Text("Describe what you want to query (alt-p):", size=(30, 1))],
+        [sg.Multiline(size=(40, 5), key='-AI-PROMPT-', expand_x=True, tooltip="Enter natural language description of your query (alt-p to focus)")],
+        [sg.Button('Generate SQL', key='-GENERATE-SQL-', button_color=('white', 'green'), expand_x=True, tooltip="Generate and apply SQL to query editor (alt-g)")]
     ]
     
-    ai_prompt_layout = [
-        [sg.Text("Natural Language Prompt:"), sg.Push()],
-        [sg.Multiline(default_text=state['prompt'], size=(60, 3), key='-AI-PROMPT-', expand_x=True, enter_submits=True)],
-        [sg.Button('Generate SQL', key='-AI-GENERATE-')]
+    # Controls section (above SQL query)
+    controls_section = [
+        [sg.Button('Search', key='-SEARCH-', button_color=('white', 'green'), tooltip="Execute query (alt-s)"),
+         sg.Button('Reset', key='-RESET-', tooltip="Reset to default query")]
     ]
-
-    # Get available themes
-    available_themes = sg.theme_list()
-    current_theme = sg.theme()
     
-    # Action Buttons
-    action_buttons_row = [
-        sg.Button('Search', key='-SEARCH-'),
-        sg.Button('Reset', key='-RESET-'),
-        sg.Push(),
-        sg.Text('Theme:', size=(5, 1)),
-        sg.Combo(available_themes, default_value=current_theme, key='-THEME-', size=(20, 1), enable_events=True, readonly=True),
-        sg.Button('Export DB', key='-EXPORT-'),
-        sg.Button('Import DB', key='-IMPORT-')
-    ]
-
-    # --- LEFT PANE CONTENT ---
-    left_pane_content = [
-        [sg.Frame('AI Builder Settings', ai_config_layout, expand_x=True)],
-        *ai_prompt_layout,
-        [sg.Text("SQL Query (Generated/Editable):")],
-        # This Multiline replaces the old -QUERY- and -AI-RESPONSE-
-        [sg.Multiline(default_text=state['query'], size=(60, 6), key='-QUERY-', expand_x=True, expand_y=True)],
-        action_buttons_row,
+    # Left section (Query builder with AI and controls moved above)
+    left_section = [
+        [sg.Frame('AI SQL Builder', ai_builder_layout, expand_x=True)],
         [sg.HorizontalSeparator()],
-        [sg.Text("Data Table:")],
+        [sg.Text("SQL Query (alt-q):")],
+        [sg.Combo(query_history_list, key='-QUERY-HISTORY-', size=(80, 1), enable_events=True, readonly=True, tooltip="Select from previous queries", expand_x=True)],
+        *controls_section,  # Unpack the list
+        [sg.Multiline(default_text=browser.default_query, size=(60, 10), key='-QUERY-', expand_x=True, expand_y=True, tooltip="Enter your SQL query here (alt-q to focus)")]
+    ]
+
+    # Menu Definition
+    menu_def = [
+        ['File', ['Export DB', 'Import DB', '---', 'Exit']], 
+        ['AI', ['LLM Settings...']],
+        ['Theme', THEMES]
+    ]
+
+    # Right section - table and detail view with horizontal splitter
+    table_area = [
+        [sg.Text("", key='-TABLE-INFO-', font=('Any', 10, 'bold'), text_color='orange')],
         [sg.Table(
             values=[],
             headings=columns,
@@ -361,190 +484,86 @@ def main():
         [
             sg.Button('First', key='-FIRST-'),
             sg.Button('Previous', key='-PREVIOUS-'),
-            sg.Text('', key='-PAGE_INFO-', size=(20, 1), justification='center'),
+            sg.Text('', key='-PAGE_INFO-', size=(30, 1), justification='center'),
             sg.Button('Next', key='-NEXT-'),
-            sg.Button('Last', key='-LAST-')
+            sg.Button('Last', key='-LAST-'),
+            sg.Push(),
+            sg.Button('Copy as CSV', key='-COPY-CSV-', button_color=('white', 'purple'))
         ]
     ]
-
-    # --- RIGHT PANE CONTENT (History + Details + Schema Context) ---
-    # Moved Schema here as a tab or just context? User said "condition builder shall includes all db fields"
-    # User didn't ask to remove Context, but AI Builder Tab is gone. I'll put Schema in a Tab in Right Pane.
-    right_pane_content = [
-        [sg.Text("Query History:")],
-        [sg.Multiline(default_text=state['history'], size=(30, 10), key='-HISTORY-', disabled=True, expand_x=True, expand_y=True)],
-        [sg.HorizontalSeparator()],
+    
+    detail_area = [
         [sg.TabGroup([
             [
-                sg.Tab('Detail View', [[sg.Multiline(size=(40, 30), key='-DETAIL-', disabled=True, expand_x=True, expand_y=True)]], key='-DETAIL-TAB-'),
-                sg.Tab('Compact View', [[sg.Multiline(size=(40, 30), key='-COMPACT-', disabled=True, expand_x=True, expand_y=True)]], key='-COMPACT-TAB-'),
-                sg.Tab('Schema Context', [[sg.Multiline(size=(40, 30), key='-SCHEMA-CONTEXT-', disabled=True, expand_x=True, expand_y=True)]], key='-SCHEMA-TAB-')
+                sg.Tab('JSON', [[
+                    sg.Multiline(size=(40, 10), key='-DETAIL-JSON-', disabled=True, expand_x=True, expand_y=True, font=('Courier', 10))
+                ]], key='-JSON-TAB-'),
+                sg.Tab('Plain Text', [[
+                    sg.Multiline(size=(40, 10), key='-DETAIL-PLAIN-', disabled=True, expand_x=True, expand_y=True, font=('Courier', 10))
+                ]], key='-PLAIN-TAB-')
             ]
-        ], key='-TABS-', expand_x=True, expand_y=True)]
+        ], key='-DETAIL-TABS-', expand_x=True, expand_y=True)]
     ]
-
-    # Use sg.Column to wrap contents for Pane
-    left_col = sg.Column(left_pane_content, expand_x=True, expand_y=True, key='-LEFT-PANE-', size=(1080, 800))
-    right_col = sg.Column(right_pane_content, expand_x=True, expand_y=True, key='-RIGHT-PANE-', size=(720, 800))
-
+    
+    # Right section with horizontal pane between table and detail
+    right_section = [
+        [sg.Pane(
+            [
+                sg.Column(table_area, expand_x=True, expand_y=True),
+                sg.Column(detail_area, expand_x=True, expand_y=True)
+            ],
+            orientation='vertical',
+            relief=sg.RELIEF_GROOVE,
+            expand_x=True,
+            expand_y=True,
+            show_handle=True,
+            key='-TABLE-DETAIL-PANE-'
+        )]
+    ]
+    
     layout = [
-        [sg.Pane([left_col, right_col], orientation='horizontal', relief=sg.RELIEF_GROOVE, expand_x=True, expand_y=True, show_handle=True)]
+        [sg.Menu(menu_def)],
+        [sg.Pane(
+            [
+                sg.Column(left_section, expand_x=True, expand_y=True),
+                sg.Column(right_section, expand_x=True, expand_y=True)
+            ],
+            orientation='horizontal',
+            relief=sg.RELIEF_GROOVE,
+            expand_x=True,
+            expand_y=True,
+            show_handle=True,
+            key='-MAIN-PANE-'
+        )]
     ]
 
-    window = sg.Window('FreeSimpleSQL', layout, resizable=True, finalize=True, size=(1800, 900))
+    window = sg.Window('Database Browser', layout, resizable=True, finalize=True, size=(1800, 900))
     
-    # Initialize Schema Text in the new tab
-    window['-SCHEMA-CONTEXT-'].update(browser.get_schema())
+    # Bind keyboard shortcuts (lowercase)
+    # We add multiple variants to ensure they work across different OS/backend versions
+    for char in ['p', 'g', 'q', 's', 'r']:
+        window.bind(f'<Alt-{char}>', f'ALT-{char.upper()}')
+        window.bind(f'<Alt-{char.upper()}>', f'ALT-{char.upper()}')
+
     
-    # Use LIMIT for the default query
+    # Update history dropdown
+    window['-QUERY-HISTORY-'].update(values=query_history_list)
+    
+    # Show default query results on startup
     update_table(browser.default_query)
-        
-    # Bind double click event
-    window['-TABLE-'].bind('<Double-Button-1>', '+DOUBLE_CLICK+')
 
     while True:
         event, values = window.read()
-        if event == sg.WIN_CLOSED:
-            # Save state before closing
-            save_state(
-                values['-QUERY-'],
-                values['-AI-PROMPT-'],
-                values['-HISTORY-']
-            )
+        
+        # Debug: print event for hotkey testing
+        if isinstance(event, str) and event.startswith('ALT-'):
+            logger.debug(f"Hotkey triggered: {event}")
+        
+        if event in (sg.WIN_CLOSED, 'Exit'):
             break
-        elif event == '-THEME-':
-            # Change theme immediately by saving and restarting
-            new_theme = values['-THEME-']
-            # Save all current settings including the new theme
-            save_settings(
-                values['-AI-URL-'],
-                values['-AI-MODEL-'],
-                values['-AI-KEY-'],
-                new_theme
-            )
-            # Save current UI state before restart
-            save_state(
-                values['-QUERY-'],
-                values['-AI-PROMPT-'],
-                values['-HISTORY-']
-            )
-            # Close current window and restart with new theme
-            window.close()
-            main()
-            return
-        elif event == '-AI-GENERATE-':
-            url = values['-AI-URL-'].strip()
-            model = values['-AI-MODEL-'].strip()
-            api_key = values['-AI-KEY-'].strip()
-            prompt = values['-AI-PROMPT-'].strip()
-            # Get schema from the hidden/right pane tab
-            schema = values['-SCHEMA-CONTEXT-'] 
-            
-            # Save settings
-            save_settings(url, model, api_key)
-
-            if not api_key:
-                sg.popup_error("Please enter an API Key.")
-                continue
-            
-            if not prompt:
-                sg.popup_error("Please enter a natural language prompt.")
-                continue
-
-            # Validate URL
-            if not url.startswith('http'):
-                sg.popup_error("Invalid API URL. Must start with http:// or https://")
-                continue
-
-            full_prompt = f"Given the following SQLite schema:\n{schema}\n\nWrite a SQL query for: {prompt}\nOnly return the SQL, no markdown or explanation."
-            
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "user", "content": full_prompt}
-                ]
-            }
-            
-            # Match OpenRouter's exact example format
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            try:
-                window.set_cursor('wait')
-                
-                # Make the API request using the exact format from OpenRouter's example
-                response = requests.post(
-                    url=url,
-                    headers=headers,
-                    data=json.dumps(payload),  # Using data=json.dumps() as in their example
-                    timeout=60
-                )
-                
-                # Log the response for debugging
-                logger.debug(f"API Response Status: {response.status_code}")
-                logger.debug(f"API Response Headers: {response.headers}")
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'choices' in data and len(data['choices']) > 0:
-                        content = data['choices'][0]['message']['content']
-                        # Clean up markdown formatting
-                        content = content.replace('```sql', '').replace('```', '').strip()
-                        # Update the Main Query Window
-                        window['-QUERY-'].update(content)
-                        # Save state to preserve the generated query
-                        save_state(content, values['-AI-PROMPT-'], values['-HISTORY-'])
-                        sg.popup_quick_message('SQL generated successfully!', background_color='green', text_color='white')
-                    else:
-                        sg.popup_error(f"No content in response.\n\nResponse: {data}")
-                elif response.status_code == 401:
-                    error_detail = response.text
-                    sg.popup_error(
-                        f"Authentication Error (401)\n\n"
-                        f"Your API key may be invalid or expired.\n\n"
-                        f"Server response: {error_detail}\n\n"
-                        f"Tips:\n"
-                        f"1. Verify your API key is correct\n"
-                        f"2. Check if your key has the required permissions\n"
-                        f"3. Ensure you're using the correct API endpoint\n"
-                        f"4. For OpenRouter, keys should start with 'sk-or-...'\n"
-                        f"5. Get a key at: https://openrouter.ai/keys"
-                    )
-                else:
-                    sg.popup_error(f"Error {response.status_code}\n\n{response.text}")
-
-            except requests.exceptions.Timeout:
-                sg.popup_error("Request timed out. The API server may be slow or unavailable.")
-            except requests.exceptions.ConnectionError:
-                sg.popup_error(f"Connection error. Could not reach: {url}")
-            except requests.exceptions.RequestException as e:
-                sg.popup_error(f"Request Error: {str(e)}")
-            except Exception as e:
-                sg.popup_error(f"Unexpected Error: {str(e)}")
-            finally:
-                window.set_cursor('arrow')
-
-        elif event == '-TABLE-+DOUBLE_CLICK+':
-            if len(values['-TABLE-']) > 0:
-                row_idx = values['-TABLE-'][0]
-                # Check if row_idx is valid
-                if row_idx < len(current_page_rows):
-                    row_data = current_page_rows[row_idx]
-                    new_values = open_edit_modal(row_data)
-                    if new_values:
-                        success, pid = browser.update_record(row_data.id, new_values)
-                        if success:
-                            # Refresh table
-                            update_table(values['-QUERY-'].strip())
-                        else:
-                            sg.popup_error(f"Failed to update record: {pid}")
-                            
-        elif event == '-EXPORT-':
+        elif event == 'Export DB':
             export_path = sg.popup_get_file('Save database as...', save_as=True, default_extension='.db', file_types=(('SQLite DB', '*.db'),))
             if export_path:
-                
                 try:
                     shutil.copy('database.db', export_path)
                     logger.debug(f"Database exported to {export_path}")
@@ -553,7 +572,7 @@ def main():
                     sg.popup(f'Export failed: {e}', title='Export Error')
                     logger.debug(f"Export failed: {e}")
                     
-        elif event == '-IMPORT-':
+        elif event == 'Import DB':
             import_path = sg.popup_get_file(
                 'Select SQLite database to import',
                 file_types=(('SQLite DB', '*.db;*.sqlite;*.sqlite3'),)
@@ -561,78 +580,159 @@ def main():
             if import_path:
                 try:
                     logger.debug(f"Importing database from {import_path}")
-                    sg.popup('Database imported successfully! Restarting view...', title='Import')
+                    sg.popup('Database imported successfully! Run a query to see data.', title='Import')
 
                     browser.engine = create_engine(f'sqlite:///{import_path}', echo=False)
                     browser.current_page = 0
-                    update_table(browser.default_query)
                 except Exception as e:
                     sg.popup(f'Import failed: {e}', title='Import Error')
         elif event == '-RESET-':
+            # Save current state before resetting
+            current_query = values['-QUERY-'].strip()
+            current_prompt = values['-AI-PROMPT-'].strip()
+            
+            # Save to history if there's meaningful content
+            if current_query and current_query != browser.default_query:
+                history_entry = {
+                    'prompt': current_prompt if current_prompt else '',
+                    'query': current_query,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                # Add to history (avoid duplicates)
+                if not query_history_data or query_history_data[0]['query'] != current_query:
+                    query_history_data.insert(0, history_entry)
+                    query_history_data = query_history_data[:MAX_HISTORY]
+                    save_history(query_history_data)
+                    query_history_list = [item['query'] for item in query_history_data]
+                    window['-QUERY-HISTORY-'].update(values=query_history_list)
+            
+            # Reset everything
             browser.current_page = 0
-            window['-QUERY-'].update(browser.default_query)  # Reset textarea to default query
-            update_table(browser.default_query)
-        elif event == '-SEARCH-':
+            window['-QUERY-'].update(browser.default_query)
+            window['-AI-PROMPT-'].update('')  # Clear AI prompt
+            # Clear table
+            window['-TABLE-'].update(values=[])
+            window['-TABLE-INFO-'].update('')
+            window['-PAGE_INFO-'].update('')
+        elif event == '-SEARCH-' or event == 'ALT-S':
             browser.current_page = 0
             query = values['-QUERY-'].strip()
+            prompt = values['-AI-PROMPT-'].strip()
             if query:
-                # Build history entry with prompt and SQL
-                prompt = values['-AI-PROMPT-'].strip()
-                history_entry = ""
-                if prompt:
-                    history_entry += f"Prompt: {prompt}\n"
-                history_entry += f"SQL: {query}\n--------\n"
+                # Create history entry with prompt and query
+                history_entry = {
+                    'prompt': prompt if prompt else '',  # Save empty string if no prompt
+                    'query': query,
+                    'timestamp': datetime.now().isoformat()
+                }
                 
-                # Add to the top of the history
-                history = window['-HISTORY-'].get()
-                updated_history = f"{history_entry}{history}" if history else history_entry
-                window['-HISTORY-'].update(updated_history)
-                # Save state to preserve history
-                save_state(query, prompt, updated_history)
+                logger.debug(f"Saving history entry: prompt='{prompt}', query='{query[:50]}...'")
+                
+                # Check for duplicate by query only
+                is_duplicate = False
+                for existing in query_history_data:
+                    if existing['query'] == query:
+                        is_duplicate = True
+                        break
+                
+                # Add to history data only if unique
+                if not is_duplicate:
+                    query_history_data.insert(0, history_entry)
+                    query_history_data = query_history_data[:MAX_HISTORY]  # Keep max 300
+                    save_history(query_history_data)
+                    # Update dropdown
+                    query_history_list = [item['query'] for item in query_history_data]
+                    window['-QUERY-HISTORY-'].update(values=query_history_list, value=query)
+                
+                # Execute query and show results in table
                 update_table(query)
         
-        # --- Operator Buttons: Just append text ---
-        elif event == '-NOT-FILTER-':
-            current_query = values['-QUERY-'].strip()
-            updated_query = f"{current_query} NOT "
-            window['-QUERY-'].update(updated_query)                
-        elif event == '-ADD-FILTER-':
-            current_query = values['-QUERY-'].strip()
-            updated_query = f"{current_query} AND "
-            window['-QUERY-'].update(updated_query)
-        elif event == '-OR-FILTER-':
-            current_query = values['-QUERY-'].strip()
-            updated_query = f"{current_query} OR "
-            window['-QUERY-'].update(updated_query)
-        elif event == '-OPEN-BRACKET-':
-            current_query = values['-QUERY-'].strip()
-            updated_query = f"{current_query} ( "
-            window['-QUERY-'].update(updated_query)
-        elif event == '-CLOSE-BRACKET-':
-            current_query = values['-QUERY-'].strip()
-            updated_query = f"{current_query} ) "
-            window['-QUERY-'].update(updated_query)
+        elif event == '-QUERY-HISTORY-':
+            # Load selected query from history
+            selected_query = values['-QUERY-HISTORY-']
+            if selected_query:
+                # Find the history entry
+                for entry in query_history_data:
+                    if entry['query'] == selected_query:
+                        window['-QUERY-'].update(entry['query'])
+                        if entry.get('prompt'):
+                            window['-AI-PROMPT-'].update(entry['prompt'])
+                        break
+        
+        elif event == '-COPY-CSV-':
+            copy_table_to_csv()
+        elif event == '-GENERATE-SQL-' or event == 'ALT-G':
+            # Use saved API settings from config
+            prompt = values['-AI-PROMPT-'].strip()
+            api_key = config.get('api_key', '')
+            model = config.get('model', 'z-ai/glm-4.7-flash')
             
-        elif event == '-SHOW-SCHEMA-':
-            # Open the new AI Builder
-            open_ai_builder(browser.get_schema())
-
-        # Check for Append Condition buttons (0-3)
-        if isinstance(event, str) and event.startswith('-APPEND-CONDITION-'):
-            try:
-                # event format: -APPEND-CONDITION-0-
-                idx = int(event.split('-')[3])
-                col = values[f'-FILTER-COL-{idx}-']
-                op = values[f'-FILTER-OP-{idx}-']
-                val = values[f'-FILTER-VALUE-{idx}-']
-                if col and op and val:
-                    condition = f"{col} {op} '{val}'"
-                    current_query = values['-QUERY-'].strip()
-                    updated_query = f"{current_query} {condition}"
-                    window['-QUERY-'].update(updated_query)
-            except Exception as e:
-                logger.error(f"Error appending condition: {e}")
+            if not prompt:
+                sg.popup_error('Please enter a prompt describing what you want to query.')
+                continue
+            
+            if not api_key:
+                sg.popup_error('Please configure API settings first.\nGo to: AI → LLM Settings')
+                continue
+            
+            # Save current query and prompt before generating new SQL
+            current_query = values['-QUERY-'].strip()
+            current_prompt_old = values['-AI-PROMPT-'].strip()
+            
+            if current_query and current_query != browser.default_query:
+                history_entry = {
+                    'prompt': current_prompt_old if current_prompt_old else '',
+                    'query': current_query,
+                    'timestamp': datetime.now().isoformat()
+                }
                 
+                # Check for duplicate
+                is_duplicate = False
+                for existing in query_history_data:
+                    if existing['query'] == current_query:
+                        is_duplicate = True
+                        break
+                
+                if not is_duplicate:
+                    query_history_data.insert(0, history_entry)
+                    query_history_data = query_history_data[:MAX_HISTORY]
+                    save_history(query_history_data)
+                    query_history_list = [item['query'] for item in query_history_data]
+                    window['-QUERY-HISTORY-'].update(values=query_history_list)
+            
+            # Generate SQL
+            schema = browser.get_schema()
+            sql_result = generate_sql_with_ai(prompt, model, api_key, schema)
+            
+            # Auto-apply to query editor if successful
+            if sql_result and not sql_result.startswith('Error:'):
+                window['-QUERY-'].update(sql_result)
+                sg.popup_quick_message('SQL generated and applied to query editor!', background_color='green', text_color='white')
+            else:
+                sg.popup_error(f'Failed to generate SQL:\n{sql_result}')
+        
+        # Keyboard shortcut for AI prompt focus
+        elif event == 'ALT-P':
+            window['-AI-PROMPT-'].set_focus()
+            continue
+        
+        elif event == 'LLM Settings...':
+            open_ai_settings()
+        
+        elif event in THEMES:
+            # Theme selected from menu - save and restart to apply immediately
+            config['theme'] = event
+            save_config(config)
+            sg.popup_quick_message(f'Changing theme to {event}... Restarting...', background_color='red', text_color='white')
+            # Restart using -m to preserve package context for relative imports
+            os.execl(sys.executable, sys.executable, '-m', 'freesimplesql')
+        
+        # Keyboard shortcut for SQL Query focus
+        elif event == 'ALT-Q':
+            window['-QUERY-'].set_focus()
+            continue
+        
         elif event == '-FIRST-':
             browser.current_page = 0
             update_table(values['-QUERY-'].strip())
@@ -650,22 +750,28 @@ def main():
         elif event == '-TABLE-':
             if values['-TABLE-']:
                 selected_idx = values['-TABLE-'][0]
-                # Use the cached rows for the current page
-                rows = current_page_rows
-                if selected_idx < len(rows):
-                    row = rows[selected_idx]
-                    row_dict = browser.get_row_dict(row)
-                    if 'msg_content' in row_dict:
+                if selected_idx < len(current_page_rows):
+                    row = current_page_rows[selected_idx]
+                    # Handle both Message objects and dictionaries
+                    if isinstance(row, dict):
+                        row_dict = row
+                    else:
+                        row_dict = {col: getattr(row, col, '') for col in current_columns}
+                    # Try to parse msg_content if it exists
+                    if 'msg_content' in row_dict and row_dict['msg_content'] is not None:
                         try:
                             parsed_content = json.loads(row_dict['msg_content'])
                             row_dict['msg_content'] = parsed_content
-                        except json.JSONDecodeError:
-                            logger.debug("Failed to parse `msg_content` as JSON.")
+                        except (json.JSONDecodeError, TypeError):
+                            logger.debug("Failed to parse msg_content as JSON.")
+                    # Update both JSON and Plain Text tabs
                     pretty_json = json.dumps(row_dict, indent=4, default=str)
-                    window['-DETAIL-'].update(pretty_json)
-                    window['-COMPACT-'].update("\n".join([f"{k}: {v}" for k, v in row_dict.items()]))
+                    plain_text = '\n'.join([f"{k}: {v}" for k, v in row_dict.items()])
+                    window['-DETAIL-JSON-'].update(pretty_json)
+                    window['-DETAIL-PLAIN-'].update(plain_text)
                 else:
                     logger.debug("Selected index is out of range for the query result.")
+
 
     window.close()
 
