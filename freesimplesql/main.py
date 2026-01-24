@@ -17,7 +17,7 @@ import pathlib
 import sys
 
 # Configuration file path
-CONFIG_FILE = "app_config.json"
+CONFIG_FILE = "settings.json"
 HISTORY_FILE = "query_history.json"
 MAX_HISTORY = 300
 
@@ -237,10 +237,10 @@ class DBBrowser:
         }
 
 
-def generate_sql_with_ai(prompt: str, model: str, api_key: str, schema: str) -> str:
-    """Generate SQL query using OpenRouter API."""
+def generate_sql_with_ai(prompt: str, model: str, api_key: str, schema: str, api_url: str = None) -> str:
+    """Generate SQL query using OpenRouter or compatible API."""
     try:
-        url = "https://openrouter.ai/api/v1/chat/completions"
+        url = api_url if api_url else "https://openrouter.ai/api/v1/chat/completions"
         
         # Clean the API key - remove any whitespace or newlines
         api_key = api_key.strip()
@@ -296,6 +296,8 @@ Rules:
         
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed: {e}")
+        if e.response is not None and e.response.status_code == 401:
+            return "Error: 401 Unauthorized. Please check your API Key in AI -> LLM Settings."
         return f"Error: API request failed - {str(e)}"
     except Exception as e:
         logger.error(f"Error generating SQL: {e}")
@@ -398,6 +400,7 @@ def main():
                  'google/gemini-2.5-flash-lite'
              ], default_value=config.get('model', 'z-ai/glm-4.7-flash'), key='-AI-MODEL-DLG-', size=(40, 1))],
             [sg.Text("Or enter model manually:", size=(18, 1)), sg.InputText(key='-AI-MODEL-MANUAL-DLG-', size=(30, 1), expand_x=True)],
+            [sg.Text("API URL:", size=(10, 1)), sg.InputText(default_text=config.get('api_url', 'https://openrouter.ai/api/v1/chat/completions'), key='-AI-API-URL-DLG-', size=(40, 1), expand_x=True)],
             [sg.Text("API Key:", size=(10, 1)), sg.InputText(default_text=config.get('api_key', ''), key='-AI-API-KEY-DLG-', password_char='*', size=(40, 1), expand_x=True)],
             [sg.HorizontalSeparator()],
             [sg.Button('Save', key='-SAVE-AI-SETTINGS-', button_color=('white', 'green')), sg.Button('Cancel', key='-CANCEL-AI-DLG-')]
@@ -423,6 +426,7 @@ def main():
                 # Save API key to config
                 config['api_key'] = api_key
                 config['model'] = final_model
+                config['api_url'] = values['-AI-API-URL-DLG-'].strip()
                 save_config(config)
                 
                 sg.popup_quick_message('API settings saved!', background_color='green', text_color='white')
@@ -667,6 +671,7 @@ def main():
             prompt = values['-AI-PROMPT-'].strip()
             api_key = config.get('api_key', '')
             model = config.get('model', 'z-ai/glm-4.7-flash')
+            api_url = config.get('api_url', 'https://openrouter.ai/api/v1/chat/completions')
             
             if not prompt:
                 sg.popup_error('Please enter a prompt describing what you want to query.')
@@ -703,7 +708,7 @@ def main():
             
             # Generate SQL
             schema = browser.get_schema()
-            sql_result = generate_sql_with_ai(prompt, model, api_key, schema)
+            sql_result = generate_sql_with_ai(prompt, model, api_key, schema, api_url)
             
             # Auto-apply to query editor if successful
             if sql_result and not sql_result.startswith('Error:'):

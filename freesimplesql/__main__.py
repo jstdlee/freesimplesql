@@ -1,4 +1,8 @@
-from .main import main
+try:
+    from freesimplesql.main import main
+except ImportError:
+    from .main import main
+
 
 if __name__ == "__main__":
     main()
